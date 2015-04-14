@@ -36,8 +36,18 @@ Process states:
 
 Examples:
 
-# run, Forrest, run
-php <?=basename(__FILE__)?> -i 5 -t 60
+# Capture 600 seconds of server state, including load average,
+# total memory used and cpu/memory distribution between processes
+# stripping processes with <0.2% of cpu and mem usage
+php <?=basename(__FILE__)?> -i 1 -t 600 -min 0.2 -n misc -c load_average la1 \
+    -c mem_used memUsed -sc cpu *:cpu -sc mem *:mem
+
+
+# Capture 600 seconds of server state, including load average,
+# total memory used and count of active php-fpm workers
+php <?=basename(__FILE__)?> -i 1 -t 600 -n php-workers -c load_average la1 -c mem_used memUsed \
+    -c php-fpm php-fpm:cnt
+
 
 <?php
 }
