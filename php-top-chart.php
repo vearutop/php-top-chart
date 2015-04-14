@@ -13,6 +13,26 @@ Options:
 	-t <seconds> total time
     -x <time|elapsed|seq> type of x axis (absolute time, time from start, sequence number)
     -c <chart_name> <field1>[,field2[...fieldN]] add chart to report
+    -H use top with threads
+    -z skip zero %cpu and %mem
+    -min <val> skip if %cpu and %mem are less than <val>
+    -sc <chart_name> <field1>[,field2[...fieldN]] add stacked chart to report
+
+Fields can be
+System wide attributes (see top):
+    la1 la5 la15       for load average
+    tasksTotal tasksRunning tasksSleeping tasksStopped tasksZombie      for tasks count
+    cpuUs cpuSy cpuNi cpuId cpuWa cpuHi cpuSi cpuSt         for CPU usage
+    memTotal memUsed memFree memBuffers         for memory usage
+    swapTotal swapUsed swapFree swapCached      for swap usage
+
+Process states:
+    <command>:cpu       process cpu usage, in percent
+    <command>:mem       process memory consumtion, in percent
+    <command>:cnt       count of processes (threads if with -H)
+
+<command> is COMMAND field in top, you can use masks to select several names (e.g. php*),
+    * for all processes
 
 Examples:
 
@@ -55,12 +75,34 @@ for ($i = 1; $i < count($arguments); ++$i) {
             break;
         }
 
-        case '-c': {
+        case '-H': {
+            $t->withThreads = true;
+            break;
+        }
+
+        case '-z': {
+            $t->skipZero = true;
+            break;
+        }
+
+        case '-min': {
+            $t->skipMin = 1 * $arguments[$i+1];
+            $i++;
+            break;
+        }
+
+
+        case '-c':
+        case '-sc': {
             $chartName = $arguments[$i + 1];
             $chartFields = explode(',', $arguments[$i + 2]);
             $t->charts[$chartName] = $chartFields;
             $i++;
             $i++;
+            if ('-sc' === $arg) {
+                $t->stackedCharts[$chartName] = 1;
+            }
+
             break;
         }
         default: {
@@ -118,8 +160,8 @@ class TopParser {
     public $resultData = array();
     public $processData = array();
 
-	public function getTop() {
-		exec('/usr/bin/top -bn1', $out);
+	public function getTop($seconds) {
+		exec('/usr/bin/top ' . ($this->withThreads ? '-H ' : '') . '-bn1', $out);
         $result = new TopResult();
 
         $la = new String_Parser($out[0]);
@@ -160,59 +202,93 @@ class TopParser {
         $result->swapCached = trim($line->inner(null, 'k cached'));
 
 
-        $processDataPick = array();
+        $availableFields = (array)$result;
         for ($i = 7; $i < count($out); ++$i) {
             $line = $out[$i];
             $d = preg_split('/\s+/', $line);
+            if (count($d) == 13) {
+                array_shift($d);
+            }
+
             if (empty($d[11])) {
                 continue;
             }
+
             $name = $d[11];
+            $cpu = $d[8];
+            $mem = $d[9];
 
-
-            if (!isset($processDataPick[$name . ':cpu'])) {
-                $processDataPick[$name . ':cpu'] = 0;
-                $processDataPick[$name . ':mem'] = 0;
+            if ($this->skipZero) {
+                if ('0.0' === $cpu && '0.0' === $mem) {
+                    continue;
+                }
             }
-            $processDataPick[$name . ':cpu'] += $d[8];
-            $processDataPick[$name . ':mem'] += $d[9];
+
+            if ($this->skipMin !== null) {
+                if ($this->skipMin > 1 * $cpu && $this->skipMin > 1 * $mem) {
+                    continue;
+                }
+            }
+
+
+            //echo "$name $cpu $mem -- ";
+
+            if (!isset($availableFields[$name . ':cpu'])) {
+                $availableFields[$name . ':cpu'] = 0;
+                $availableFields[$name . ':mem'] = 0;
+                $availableFields[$name . ':cnt'] = 1;
+            }
+            $availableFields[$name . ':cpu'] += $cpu;
+            $availableFields[$name . ':mem'] += $mem;
+            $availableFields[$name . ':cnt']++;
         }
+
 
 
         foreach ($this->charts as $chartName => $chart) {
             foreach ($chart as $field) {
-                if (isset($result->$field)) {
-                    $this->series[$chartName][$field] []= 1 * $result->$field;
+                if (isset($availableFields[$field])) {
+                    $this->series[$chartName][$field] []= array($seconds, 1 * $availableFields[$field]);
                 }
-                elseif (isset($processDataPick[$field])) {
-                    $this->series[$chartName][$field] []= 1 * $processDataPick[$field];
+                elseif (str_replace(array('*','?'), '', $field) != $field) {
+                    foreach ($availableFields as $key => $value) {
+                        if (starMatch($field, $key)) {
+                            $this->series[$chartName][$key] []= array($seconds, 1 * $availableFields[$key]);
+                        }
+                    }
                 }
+                /*
                 else {
                     $this->series[$chartName][$field] []= 0;
                 }
+                */
             }
         }
 
         $uut = microtime(1);
-        $this->processData [$uut]= $processDataPick;
+        $this->processData [$uut]= $availableFields;
         $this->resultData [$uut]= $result;
     }
 
 
     private $series = array();
-    private $time = array();
+    private $seconds = array();
 
     public $sessionTitle = 'topChart';
     public $mergeSessions;
     public $interval = 1;
     public $saveInterval = 5;
     public $totalTime = 60;
+    public $withThreads = false;
     const X_TIME = 'time';
     const X_ELAPSED = 'elapsed';
     const X_SEQUENSE = 'seq';
     public $xAxis = self::X_ELAPSED;
+    public $skipZero = false;
+    public $skipMin;
 
     public $charts;
+    public $stackedCharts = array();
 
     public function mergeAction() {
         foreach ($this->mergeSessions as $sessionName) {
@@ -245,7 +321,7 @@ class TopParser {
                     'cpu' => array('cpuUs', 'cpuSy'),
                 );
             }
-            var_dump($this->charts);
+            //var_dump($this->charts);
             $this->getAll();
             $this->saveData();
         }
@@ -257,9 +333,17 @@ class TopParser {
         do {
             $this->series['xAxis'] []= round($now - $start);
             echo '.';
-            $this->getTop();
-            sleep($this->interval);
             $now = microtime(1);
+            $seconds = round($now - $start, 1);
+            $this->seconds []= $seconds;
+            $this->getTop($seconds);
+            $delta = microtime(1) - $now;
+            $sleep = $this->interval - $delta;
+
+            if ($sleep > 0) {
+                usleep(ceil(1000 * $sleep));
+            }
+
             if ($now - $lastSave > $this->saveInterval) {
                 $lastSave = $now;
                 echo 's';
@@ -305,19 +389,46 @@ HTML;
             }
             $hcSeries = json_encode($hcSeries);
 
-            $html .= <<<HTML
+            $secondsJson = json_encode($this->seconds);
+
+            if (isset($this->stackedCharts[$chartName])) {
+                $html .= <<<HTML
 <script type="text/javascript">
 $(function () {
     $('#hc-$i').highcharts({
         title:false,
         credits:{enabled:false},
-        plotOptions:{series:{marker:{enabled:false}}},
+        chart: {
+            type: 'area'
+        },
+        plotOptions:{
+            series:{marker:{enabled:false}},
+            area:{stacking: 'normal',lineWidth: 1}
+        },
+        xxAxis:{categories:$secondsJson},
         yAxis:{title:{text:"$chartName"}},
         series: $hcSeries
     });
 });
 </script>
 HTML;
+            }
+            else {
+                $html .= <<<HTML
+<script type="text/javascript">
+$(function () {
+    $('#hc-$i').highcharts({
+        title:false,
+        credits:{enabled:false},
+        plotOptions:{series:{marker:{enabled:false}}},
+        xxAxis:{categories:$secondsJson},
+        yAxis:{title:{text:"$chartName"}},
+        series: $hcSeries
+    });
+});
+</script>
+HTML;
+            }
 
         }
 
@@ -329,6 +440,14 @@ HTML;
         file_put_contents($this->sessionTitle . '.html', $html);
     }
 }
+
+function starMatch($pattern, $string) {
+    $pattern = preg_quote($pattern);
+    $pattern = '/^' . str_replace(array('\\*', '\\?'), array('.*', '.'), $pattern) . '$/';
+
+    return preg_match($pattern, $string);
+}
+
 
 class String_Parser {
     private $string;
